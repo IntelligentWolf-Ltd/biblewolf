@@ -31,7 +31,7 @@ jobs:
     # Ubuntu 22.04 = glibc 2.35, so the binary runs on most current distros.
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
@@ -64,7 +64,7 @@ jobs:
           SH
           chmod +x "dist/$name/install.sh"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*.tar.gz
@@ -73,7 +73,7 @@ jobs:
     name: Windows (x86_64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
@@ -86,7 +86,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item target/release/biblewolf.exe, README.md, LICENSE "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
           path: dist/*.zip
@@ -95,7 +95,7 @@ jobs:
     name: macOS (universal)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
@@ -134,7 +134,7 @@ jobs:
           cp README.md LICENSE "$stage/"
           hdiutil create -volname "BibleWolf" -srcfolder "$stage" -ov -format UDZO \
             "dist/biblewolf-${TAG}-macos-universal.dmg"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-universal
           path: dist/*.dmg
@@ -144,7 +144,7 @@ jobs:
     needs: [linux, windows, macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
