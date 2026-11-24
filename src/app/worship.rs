@@ -781,8 +781,8 @@ impl BibleApp {
                 .color(pal.text_dim),
             );
         }
-        for i in 0..n_items {
-            let item = self.store.services[idx].items[i].clone();
+        for (i, slot) in self.store.services[idx].items.iter_mut().enumerate() {
+            let item = slot.clone();
             card(ui, pal, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -835,9 +835,7 @@ impl BibleApp {
                                 ui.label(RichText::new(text).color(pal.text));
                             }
                         }
-                        if let ServiceItem::Song { key, .. } =
-                            &mut self.store.services[idx].items[i]
-                        {
+                        if let ServiceItem::Song { key, .. } = slot {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Key").small().color(pal.text_dim));
                                 changed |= ui
