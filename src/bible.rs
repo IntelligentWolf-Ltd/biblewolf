@@ -5,6 +5,7 @@
 //! (`formats/json/<ID>.json`). Extra translations in that same JSON format can
 //! be dropped into `<data dir>/biblewolf/bibles/`.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
@@ -290,10 +291,85 @@ const MAX_CHAPTER: u16 = 200;
 /// Index of Matthew: books before this are the Old Testament.
 pub const FIRST_NT_BOOK: usize = 39;
 
+/// Inline styling carried by some source texts (see tools/convert_usfm.py).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MarkKind {
+    /// Words of Jesus (USFM `\wj`): red letters.
+    Jesus,
+    /// Words supplied by the translators (USFM `\add`): italics.
+    Added,
+    /// Psalm title or in-text heading (USFM `\d`, `\s`): italic note.
+    Title,
+}
+
+/// A styled byte range of a verse's (marker-free) text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Mark {
+    pub start: usize,
+    pub end: usize,
+    pub kind: MarkKind,
+}
+
+/// Control characters the converters wrap styled text in.
+const MARKERS: [(char, char, MarkKind); 3] = [
+    ('\u{1}', '\u{2}', MarkKind::Jesus),
+    ('\u{3}', '\u{4}', MarkKind::Added),
+    ('\u{5}', '\u{6}', MarkKind::Title),
+];
+
+/// Remove marker characters, returning clean text plus the spans they marked.
+/// Unbalanced markers are tolerated: an unclosed span runs to the end.
+fn strip_marks(raw: &str) -> (String, Vec<Mark>) {
+    if !raw.chars().any(|c| ('\u{1}'..='\u{6}').contains(&c)) {
+        return (raw.to_owned(), Vec::new());
+    }
+    let mut text = String::with_capacity(raw.len());
+    let mut open: [Option<usize>; 3] = [None; 3];
+    let mut marks = Vec::new();
+    for c in raw.chars() {
+        if let Some(i) = MARKERS.iter().position(|(o, _, _)| *o == c) {
+            open[i].get_or_insert(text.len());
+        } else if let Some(i) = MARKERS.iter().position(|(_, cl, _)| *cl == c) {
+            if let Some(start) = open[i].take()
+                && start < text.len()
+            {
+                marks.push(Mark {
+                    start,
+                    end: text.len(),
+                    kind: MARKERS[i].2,
+                });
+            }
+        } else {
+            text.push(c);
+        }
+    }
+    for (i, o) in open.iter().enumerate() {
+        if let Some(start) = *o
+            && start < text.len()
+        {
+            marks.push(Mark {
+                start,
+                end: text.len(),
+                kind: MARKERS[i].2,
+            });
+        }
+    }
+    marks.sort_by_key(|m| m.start);
+    (text, marks)
+}
+
 pub struct Chapter {
     /// (verse number, text). Stored explicitly rather than by position so an
     /// imported translation with gaps in its numbering still lines up.
     pub verses: Vec<(u16, String)>,
+    /// Styled spans per verse; only verses that have any are present.
+    marks: HashMap<u16, Vec<Mark>>,
+}
+
+impl Chapter {
+    pub fn marks(&self, verse: u16) -> &[Mark] {
+        self.marks.get(&verse).map_or(&[], Vec::as_slice)
+    }
 }
 
 pub struct Translation {
@@ -301,6 +377,8 @@ pub struct Translation {
     pub title: String,
     /// `books[book_index][chapter - 1]`
     pub books: Vec<Vec<Chapter>>,
+    /// The source marks the words of Jesus (red-letter edition).
+    pub red_letters: bool,
 }
 
 impl Translation {
@@ -325,6 +403,7 @@ impl Translation {
 
 static EMBEDDED: &[(&str, &[u8])] = &[
     ("KJV", include_bytes!("../assets/bibles/KJV.tsv.gz")),
+    ("WEB", include_bytes!("../assets/bibles/WEB.tsv.gz")),
     ("BSB", include_bytes!("../assets/bibles/BSB.tsv.gz")),
     ("ASV", include_bytes!("../assets/bibles/ASV.tsv.gz")),
     ("NHEB", include_bytes!("../assets/bibles/NHEB.tsv.gz")),
@@ -342,15 +421,34 @@ fn empty_books() -> Vec<Vec<Chapter>> {
 }
 
 /// Place a verse, growing the chapter list as needed.
-fn push_verse(books: &mut [Vec<Chapter>], book: usize, chapter: u16, verse: u16, text: String) {
+/// Place a verse, growing the chapter list as needed. Returns whether the
+/// verse carried any words-of-Jesus markup.
+fn push_verse(
+    books: &mut [Vec<Chapter>],
+    book: usize,
+    chapter: u16,
+    verse: u16,
+    raw: &str,
+) -> bool {
     let chapters = &mut books[book];
     while chapters.len() < chapter as usize {
-        chapters.push(Chapter { verses: Vec::new() });
+        chapters.push(Chapter {
+            verses: Vec::new(),
+            marks: HashMap::new(),
+        });
     }
-    chapters[chapter as usize - 1].verses.push((verse, text));
+    let ch = &mut chapters[chapter as usize - 1];
+    let (text, marks) = strip_marks(raw);
+    let jesus = marks.iter().any(|m| m.kind == MarkKind::Jesus);
+    if !marks.is_empty() {
+        ch.marks.insert(verse, marks);
+    }
+    ch.verses.push((verse, text));
+    jesus
 }
 
-/// Parse the TSV format written by `tools/convert_scrollmapper.py`.
+/// Parse the TSV format written by `tools/convert_scrollmapper.py` and
+/// `tools/convert_usfm.py` (the latter may carry inline style markers).
 fn parse_tsv(name: &str, gz: &[u8]) -> Result<Translation, String> {
     let mut text = String::new();
     flate2::read::GzDecoder::new(gz)
@@ -363,6 +461,7 @@ fn parse_tsv(name: &str, gz: &[u8]) -> Result<Translation, String> {
         .and_then(|h| h.split_once('\t'))
         .ok_or_else(|| format!("{name}: bad header line"))?;
     let mut books = empty_books();
+    let mut red_letters = false;
     for (n, line) in lines.enumerate() {
         let mut parts = line.splitn(4, '\t');
         let bad = || format!("{name}: malformed line {}", n + 2);
@@ -373,12 +472,13 @@ fn parse_tsv(name: &str, gz: &[u8]) -> Result<Translation, String> {
         if book >= BOOKS.len() || chapter == 0 || chapter > MAX_CHAPTER {
             return Err(bad());
         }
-        push_verse(&mut books, book, chapter, verse, body.to_owned());
+        red_letters |= push_verse(&mut books, book, chapter, verse, body);
     }
     Ok(Translation {
         id: id.to_owned(),
         title: title.to_owned(),
         books,
+        red_letters,
     })
 }
 
@@ -436,11 +536,17 @@ fn parse_scrollmapper_json(path: &Path) -> Result<Translation, String> {
             }
             for v in c.verses {
                 let text = v.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                push_verse(&mut books, bi, c.chapter, v.verse, text);
+                push_verse(&mut books, bi, c.chapter, v.verse, &text);
             }
         }
     }
-    Ok(Translation { id, title, books })
+    // scrollmapper JSON carries no words-of-Jesus markup.
+    Ok(Translation {
+        id,
+        title,
+        books,
+        red_letters: false,
+    })
 }
 
 /// Directory users can drop extra scrollmapper JSON Bibles into.
@@ -509,6 +615,8 @@ pub struct ParsedRef {
     pub chapter: u16,
     pub verse: Option<u16>,
     pub verse_end: Option<u16>,
+    /// False for a bare book name ("Romans"), which defaults to chapter 1.
+    pub explicit_chapter: bool,
 }
 
 /// Lowercase, map leading roman numerals / ordinals to digits, keep only
@@ -630,6 +738,7 @@ pub fn parse_reference(input: &str) -> Option<ParsedRef> {
             chapter: 1,
             verse: None,
             verse_end: None,
+            explicit_chapter: false,
         });
     };
     let (book_part, nums) = s.split_at(split);
@@ -656,6 +765,7 @@ pub fn parse_reference(input: &str) -> Option<ParsedRef> {
         chapter,
         verse,
         verse_end,
+        explicit_chapter: true,
     })
 }
 
@@ -674,6 +784,40 @@ mod tests {
             assert_eq!(t.chapter_count(65), 22, "{} Revelation", t.id);
         }
         let kjv = ts.iter().find(|t| t.id == "KJV").unwrap();
+        // Red letters: John 3:16 is entirely the words of Jesus in the KJV.
+        assert!(kjv.red_letters);
+        let jn3 = kjv.chapter(42, 3).unwrap();
+        let t16 = kjv.verse_text(42, 3, 16).unwrap();
+        assert!(t16.starts_with("For God so loved the world"));
+        assert_eq!(
+            jn3.marks(16),
+            &[Mark {
+                start: 0,
+                end: t16.len(),
+                kind: MarkKind::Jesus
+            }]
+        );
+        assert!(jn3.marks(1).is_empty(), "narration is not red");
+        // Psalm title kept as a styled prefix; translators' words in italics.
+        let ps3 = kjv.chapter(18, 3).unwrap();
+        let t1 = kjv.verse_text(18, 3, 1).unwrap();
+        let title = ps3
+            .marks(1)
+            .iter()
+            .find(|m| m.kind == MarkKind::Title)
+            .unwrap();
+        assert_eq!(
+            &t1[title.start..title.end],
+            "A Psalm of David, when he fled from Absalom his son."
+        );
+        let added = ps3
+            .marks(1)
+            .iter()
+            .find(|m| m.kind == MarkKind::Added)
+            .unwrap();
+        assert_eq!(&t1[added.start..added.end], "are");
+        assert!(ts.iter().find(|t| t.id == "WEB").unwrap().red_letters);
+        assert!(!ts.iter().find(|t| t.id == "BSB").unwrap().red_letters);
         assert_eq!(
             kjv.verse_text(0, 1, 1),
             Some("In the beginning God created the heaven and the earth.")
@@ -725,5 +869,29 @@ mod tests {
         assert_eq!(parse_reference("grace"), None);
         assert_eq!(parse_reference("love"), None);
         assert_eq!(parse_reference("John 0"), None);
+    }
+
+    #[test]
+    fn strip_marks_spans() {
+        let (t, m) = strip_marks("He said, \u{1}Follow \u{3}me\u{4}.\u{2} Then");
+        assert_eq!(t, "He said, Follow me. Then");
+        assert_eq!(m.len(), 2);
+        let j = m.iter().find(|x| x.kind == MarkKind::Jesus).unwrap();
+        assert_eq!(&t[j.start..j.end], "Follow me.");
+        let a = m.iter().find(|x| x.kind == MarkKind::Added).unwrap();
+        assert_eq!(&t[a.start..a.end], "me");
+        // Unclosed span runs to the end; stray close is ignored.
+        let (t, m) = strip_marks("a \u{1}b\u{4}c");
+        assert_eq!(t, "a bc");
+        assert_eq!(
+            m,
+            vec![Mark {
+                start: 2,
+                end: 4,
+                kind: MarkKind::Jesus
+            }]
+        );
+        let (t, m) = strip_marks("plain");
+        assert_eq!((t.as_str(), m.len()), ("plain", 0));
     }
 }

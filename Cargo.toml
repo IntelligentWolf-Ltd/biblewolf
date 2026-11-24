@@ -1,6 +1,6 @@
 [package]
 name = "biblewolf"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "BibleWolf — Bible study desktop app"
 authors = ["IntelligentWolf Ltd <https://wolf.uk.com>"]
@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1"
 dirs = "6"
+ureq = "3"
 
 [build-dependencies]
 embed-resource = "3"

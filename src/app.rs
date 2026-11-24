@@ -17,8 +17,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+mod worship;
+use worship::WorshipState;
+
 const MAX_PANES: usize = 4;
 const WEBSITE: &str = "https://wolf.uk.com";
+const DISCORD: &str = "https://discord.gg/S3wj882aQH";
+const DONATE: &str = "https://github.com/sponsors/intelligentwolf";
 const MIN_PANE_WIDTH: f32 = 340.0;
 const MAX_SEARCH_HITS: usize = 500;
 const SAVE_DEBOUNCE_SECS: f32 = 0.8;
@@ -42,6 +47,15 @@ enum SideTab {
     Notes,
     Highlights,
     Search,
+    Songs,
+    Library,
+    Services,
+}
+
+impl SideTab {
+    fn is_worship(self) -> bool {
+        matches!(self, SideTab::Songs | SideTab::Library | SideTab::Services)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -57,6 +71,12 @@ struct Settings {
     side_tab: SideTab,
     next_pane_id: u64,
     pen: Swatch,
+    /// Opt-in: look hymns up on Hymnary.org (sends the passage reference).
+    hymns_online: bool,
+    /// Service plan that "Add to service" buttons add to.
+    active_service: Option<u64>,
+    /// Show the words of Jesus in red where the translation marks them.
+    red_letters: bool,
 }
 
 impl Default for Settings {
@@ -72,6 +92,9 @@ impl Default for Settings {
             side_tab: SideTab::Notes,
             next_pane_id: 1,
             pen: Swatch::Yellow,
+            hymns_online: false,
+            active_service: None,
+            red_letters: true,
         }
     }
 }
@@ -140,7 +163,14 @@ struct Flash {
     undo: bool,
 }
 
-/// How many deleted notes Undo can bring back in one session.
+/// Something the user deleted that Undo can bring back.
+enum Deleted {
+    Note(Note),
+    Song(store::Song),
+    Service(store::Service),
+}
+
+/// How many deletions Undo can bring back in one session.
 const UNDO_DEPTH: usize = 50;
 
 enum Action {
@@ -188,6 +218,11 @@ enum Action {
     ScrollDone(u64),
     RunOmnibox,
     UndoDelete,
+    /// Open the Songs tab for the current passage.
+    ShowSongs,
+    NoteThemeFilter(Option<String>),
+    /// Add the current passage as a reading to the active service.
+    AddReading,
     DismissErrors,
     CopyErrors,
 }
@@ -207,7 +242,9 @@ pub struct BibleApp {
     /// Error messages shown in the banner until the user dismisses them.
     errors: Vec<String>,
     /// Deleted notes, most recent last, for Undo.
-    deleted: Vec<Note>,
+    deleted: Vec<Deleted>,
+    /// Worship-leader tools state (songs, hymn lookups, services).
+    w: WorshipState,
     focus_note: Option<u64>,
     note_spawn_pos: Option<Pos2>,
     last_save_attempt: Option<Instant>,
@@ -248,6 +285,7 @@ impl BibleApp {
             flash: None,
             errors,
             deleted: Vec::new(),
+            w: WorshipState::new(),
             focus_note: None,
             note_spawn_pos: None,
             last_save_attempt: None,
@@ -315,6 +353,18 @@ impl BibleApp {
 
     fn pal(&self) -> Palette {
         theme::palette(self.s.dark)
+    }
+
+    fn push_deleted(&mut self, d: Deleted, message: String) {
+        self.deleted.push(d);
+        if self.deleted.len() > UNDO_DEPTH {
+            self.deleted.remove(0);
+        }
+        self.flash = Some(Flash {
+            text: message,
+            at: Instant::now(),
+            undo: true,
+        });
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -507,24 +557,32 @@ impl BibleApp {
             Action::DeleteNote(id) => {
                 if let Some(n) = self.store.remove_note(id) {
                     let r = ref_label(n.book, n.chapter, n.verse_start, n.verse_end);
-                    self.deleted.push(n);
-                    if self.deleted.len() > UNDO_DEPTH {
-                        self.deleted.remove(0);
-                    }
-                    self.flash = Some(Flash {
-                        text: format!("Deleted the note on {r}."),
-                        at: Instant::now(),
-                        undo: true,
-                    });
+                    self.push_deleted(Deleted::Note(n), format!("Deleted the note on {r}."));
                 }
             }
             Action::UndoDelete => {
-                if let Some(n) = self.deleted.pop() {
-                    let r = ref_label(n.book, n.chapter, n.verse_start, n.verse_end);
-                    self.store.restore_note(n);
+                if let Some(d) = self.deleted.pop() {
+                    let text = match d {
+                        Deleted::Note(n) => {
+                            let r = ref_label(n.book, n.chapter, n.verse_start, n.verse_end);
+                            self.store.restore_note(n);
+                            format!("Restored the note on {r}.")
+                        }
+                        Deleted::Song(song) => {
+                            let t = format!("Restored “{}”.", song.title);
+                            self.store.save_song(song);
+                            t
+                        }
+                        Deleted::Service(svc) => {
+                            let t = format!("Restored “{}”.", svc.title);
+                            self.s.active_service = Some(svc.id);
+                            self.store.restore_service(svc);
+                            t
+                        }
+                    };
                     // Keep offering Undo while older deletions remain.
                     self.flash = Some(Flash {
-                        text: format!("Restored the note on {r}."),
+                        text,
                         at: Instant::now(),
                         undo: !self.deleted.is_empty(),
                     });
@@ -552,6 +610,12 @@ impl BibleApp {
             }
             Action::RunOmnibox => self.run_omnibox(),
             Action::DismissErrors => self.errors.clear(),
+            Action::ShowSongs => {
+                self.s.show_side = true;
+                self.s.side_tab = SideTab::Songs;
+            }
+            Action::AddReading => self.add_current_reading(),
+            Action::NoteThemeFilter(t) => self.w.note_theme = t,
             Action::CopyErrors => {
                 ctx.copy_text(self.errors.join("\n"));
                 self.info("Error text copied.");
@@ -885,6 +949,13 @@ impl BibleApp {
             {
                 actions.push(Action::Copy);
             }
+            if ui
+                .button("🎵 Songs")
+                .on_hover_text("Hymns and songs for the selected verses (or the current chapter)")
+                .clicked()
+            {
+                actions.push(Action::ShowSongs);
+            }
             ui.separator();
 
             // Layout and view
@@ -934,6 +1005,20 @@ impl BibleApp {
             }
             if ui.button("A+").on_hover_text("Larger reading text").clicked() {
                 self.s.font_size = (self.s.font_size + 1.0).min(32.0);
+            }
+            let red: Vec<&str> =
+                self.bibles.iter().filter(|t| t.red_letters).map(|t| t.id.as_str()).collect();
+            let red_tip = if red.is_empty() {
+                "No loaded translation marks the words of Jesus".to_owned()
+            } else {
+                format!("Show the words of Jesus in red.\nAvailable in: {}", red.join(", "))
+            };
+            if ui
+                .selectable_label(self.s.red_letters, "✝ Red letters")
+                .on_hover_text(red_tip)
+                .clicked()
+            {
+                self.s.red_letters = !self.s.red_letters;
             }
             let theme_label = if self.s.dark { "☀ Light" } else { "🌙 Dark" };
             if ui.button(theme_label).on_hover_text("Switch colour theme").clicked() {
@@ -1345,6 +1430,7 @@ impl BibleApp {
                 chapter,
                 *v,
                 text,
+                ch.marks(*v),
                 &notes_here,
                 fs,
                 pal,
@@ -1391,6 +1477,7 @@ impl BibleApp {
         chapter: u16,
         verse: u16,
         text: &str,
+        marks: &[bible::Mark],
         notes_here: &[&Note],
         fs: f32,
         pal: &Palette,
@@ -1421,25 +1508,69 @@ impl BibleApp {
                 ..Default::default()
             },
         );
-        let missing = text.is_empty();
-        job.append(
-            if missing { "—" } else { text },
-            0.0,
-            TextFormat {
-                font_id: FontId::new(
-                    fs,
-                    if missing {
-                        theme::serif_italic()
-                    } else {
-                        theme::serif()
+        let background = hl.map_or(Color32::TRANSPARENT, |c| theme::highlight_ink(c, pal.dark));
+        if text.is_empty() {
+            job.append(
+                "—",
+                0.0,
+                TextFormat {
+                    font_id: FontId::new(fs, theme::serif_italic()),
+                    color: pal.text_dim,
+                    line_height: Some(fs * 1.6),
+                    ..Default::default()
+                },
+            );
+        } else {
+            // Split the verse at every mark boundary and style each piece.
+            let mut cuts: Vec<usize> = vec![0, text.len()];
+            for m in marks {
+                cuts.push(m.start.min(text.len()));
+                cuts.push(m.end.min(text.len()));
+            }
+            cuts.sort_unstable();
+            cuts.dedup();
+            for w in cuts.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if a >= b || !text.is_char_boundary(a) || !text.is_char_boundary(b) {
+                    continue;
+                }
+                let has = |k: bible::MarkKind| {
+                    marks
+                        .iter()
+                        .any(|m| m.kind == k && m.start <= a && b <= m.end)
+                };
+                let title = has(bible::MarkKind::Title);
+                let italic = title || has(bible::MarkKind::Added);
+                let red = self.s.red_letters && has(bible::MarkKind::Jesus);
+                // Highlighted text always uses the full-contrast colours
+                // (the theme tests check each against every ink).
+                let color = match (title, red, hl.is_some()) {
+                    (true, _, false) => pal.text_dim,
+                    (true, _, true) => pal.text,
+                    (false, true, false) => pal.red_letter,
+                    (false, true, true) => pal.red_letter_on_ink,
+                    (false, false, _) => pal.text,
+                };
+                job.append(
+                    &text[a..b],
+                    0.0,
+                    TextFormat {
+                        font_id: FontId::new(
+                            if title { fs * 0.88 } else { fs },
+                            if italic {
+                                theme::serif_italic()
+                            } else {
+                                theme::serif()
+                            },
+                        ),
+                        color,
+                        background,
+                        line_height: Some(fs * 1.6),
+                        ..Default::default()
                     },
-                ),
-                color: if missing { pal.text_dim } else { pal.text },
-                background: hl.map_or(Color32::TRANSPARENT, |c| theme::highlight_ink(c, pal.dark)),
-                line_height: Some(fs * 1.6),
-                ..Default::default()
-            },
-        );
+                );
+            }
+        }
         let galley = ui.painter().layout_job(job);
         let size = vec2(width, galley.size().y + PAD.y * 2.0);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -1575,6 +1706,14 @@ impl BibleApp {
                 actions.push(Action::AddNote);
                 ui.close();
             }
+            if ui.button("🎵 Songs for this passage").clicked() {
+                actions.push(Action::ShowSongs);
+                ui.close();
+            }
+            if ui.button("➕ Add reading to service").clicked() {
+                actions.push(Action::AddReading);
+                ui.close();
+            }
             if ui.button("📋 Copy").clicked() {
                 actions.push(Action::Copy);
                 ui.close();
@@ -1590,14 +1729,39 @@ impl BibleApp {
     fn side_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let pal = self.pal();
         ui.add_space(6.0);
+        // Two groups keep each row of tabs short (Hick's law).
+        let worship = self.s.side_tab.is_worship();
         ui.horizontal(|ui| {
-            for (tab, name) in [
+            if ui.selectable_label(!worship, "📖 Study").clicked() && worship {
+                self.s.side_tab = SideTab::Notes;
+            }
+            if ui.selectable_label(worship, "🎵 Worship").clicked() && !worship {
+                self.s.side_tab = SideTab::Songs;
+            }
+        });
+        let tabs: &[(SideTab, &str)] = if self.s.side_tab.is_worship() {
+            &[
+                (SideTab::Songs, "Songs"),
+                (SideTab::Library, "My songs"),
+                (SideTab::Services, "Services"),
+            ]
+        } else {
+            &[
                 (SideTab::Notes, "Notes"),
                 (SideTab::Highlights, "Highlights"),
                 (SideTab::Search, "Search"),
-            ] {
-                if ui.selectable_label(self.s.side_tab == tab, name).clicked() {
-                    self.s.side_tab = tab;
+            ]
+        };
+        ui.horizontal(|ui| {
+            for (tab, name) in tabs {
+                let sel = self.s.side_tab == *tab;
+                let text = if sel {
+                    RichText::new(*name).strong().color(pal.accent)
+                } else {
+                    RichText::new(*name)
+                };
+                if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                    self.s.side_tab = *tab;
                 }
             }
         });
@@ -1609,6 +1773,9 @@ impl BibleApp {
                 SideTab::Notes => self.notes_list(ui, &pal, actions),
                 SideTab::Highlights => self.highlights_list(ui, &pal, actions),
                 SideTab::Search => self.search_list(ui, &pal, actions),
+                SideTab::Songs => self.songs_tab(ui, &pal),
+                SideTab::Library => self.library_tab(ui, &pal),
+                SideTab::Services => self.services_tab(ui, &pal),
             });
     }
 
@@ -1635,8 +1802,52 @@ impl BibleApp {
             );
             return;
         }
-        let mut notes: Vec<&Note> = self.store.notes.iter().collect();
+        let mut themes: Vec<String> = self
+            .store
+            .notes
+            .iter()
+            .flat_map(|n| n.themes.iter().cloned())
+            .collect();
+        themes.sort_by_key(|t| t.to_lowercase());
+        themes.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        if !themes.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for t in &themes {
+                    let sel = self
+                        .w
+                        .note_theme
+                        .as_deref()
+                        .is_some_and(|x| x.eq_ignore_ascii_case(t));
+                    if worship::chip(ui, t, sel, pal)
+                        .on_hover_text("Show notes with this theme")
+                        .clicked()
+                    {
+                        actions.push(Action::NoteThemeFilter(if sel {
+                            None
+                        } else {
+                            Some(t.clone())
+                        }));
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
+        let mut notes: Vec<&Note> = self
+            .store
+            .notes
+            .iter()
+            .filter(|n| {
+                self.w
+                    .note_theme
+                    .as_deref()
+                    .is_none_or(|t| n.themes.iter().any(|x| x.eq_ignore_ascii_case(t)))
+            })
+            .collect();
         notes.sort_by_key(|n| (n.book, n.chapter, n.verse_start, n.id));
+        if notes.is_empty() {
+            ui.label(RichText::new("No notes have this theme.").color(pal.text_dim));
+        }
         for n in notes {
             let paper = theme::note_paper(n.color);
             Frame::new()
@@ -1717,6 +1928,13 @@ impl BibleApp {
                             start: n.verse_start,
                             end: n.verse_end,
                         });
+                    }
+                    if !n.themes.is_empty() {
+                        ui.label(
+                            RichText::new(format!("🏷 {}", n.themes.join(", ")))
+                                .small()
+                                .color(theme::NOTE_INK_DIM),
+                        );
                     }
                 });
             ui.add_space(8.0);
@@ -1986,12 +2204,15 @@ impl BibleApp {
                         // egui windows never auto-shrink (Resize keeps the max of
                         // the last content size), so unbounded content would push
                         // the note off screen.
+                        // Leave room at the bottom for the theme tags row.
+                        const TAGS_ROW: f32 = 30.0;
                         let size = ui.available_size();
+                        let text_h = (size.y - TAGS_ROW).max(40.0);
                         let r = egui::ScrollArea::vertical()
                             .id_salt(("note-scroll", note.id))
                             .auto_shrink(false)
-                            .max_height(size.y)
-                            .show(ui, |ui| ui.add_sized(vec2(ui.available_width(), size.y), te))
+                            .max_height(text_h)
+                            .show(ui, |ui| ui.add_sized(vec2(ui.available_width(), text_h), te))
                             .inner;
                         if focus == Some(note.id) {
                             r.request_focus();
@@ -2000,6 +2221,43 @@ impl BibleApp {
                             note.modified = store::now_secs();
                             edited = true;
                         }
+                        // Theme tags, so passages can be browsed by theme.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(RichText::new("🏷").color(theme::NOTE_INK_DIM));
+                            let mut remove = None;
+                            for (i, t) in note.themes.iter().enumerate() {
+                                let chip = egui::Button::new(RichText::new(format!("{t} ✖")).size(12.0).color(theme::NOTE_INK))
+                                    .fill(theme::note_band(note.color))
+                                    .corner_radius(CornerRadius::same(10));
+                                if ui.add(chip).on_hover_text("Remove tag").clicked() {
+                                    remove = Some(i);
+                                }
+                            }
+                            if let Some(i) = remove {
+                                note.themes.remove(i);
+                                edited = true;
+                            }
+                            let input = self.w.tag_input.entry(note.id).or_default();
+                            let r = ui.add(
+                                egui::TextEdit::singleline(input)
+                                    .id(Id::new(("note-tag", note.id)))
+                                    .frame(Frame::NONE)
+                                    .background_color(Color32::TRANSPARENT)
+                                    .text_color(theme::NOTE_INK)
+                                    .desired_width(ui.available_width())
+                                    .hint_text(RichText::new("add tag…").color(theme::NOTE_INK_DIM)),
+                            );
+                            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                let t = input.trim().to_owned();
+                                input.clear();
+                                if !t.is_empty() && !note.themes.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+                                    note.themes.push(t);
+                                    note.modified = store::now_secs();
+                                    edited = true;
+                                }
+                            }
+                        });
                     });
                 });
         }
@@ -2071,6 +2329,12 @@ impl BibleApp {
                 } else {
                     ("⚠ Notes are not being saved".to_owned(), pal.error_fg)
                 };
+                // Right-to-left layout: the first item added sits furthest right.
+                ui.hyperlink_to(RichText::new("♥ Donate").color(pal.accent), DONATE)
+                    .on_hover_text("Support BibleWolf on GitHub Sponsors");
+                ui.hyperlink_to(RichText::new("💬 Discord").color(pal.accent), DISCORD)
+                    .on_hover_text("Join the BibleWolf community on Discord");
+                ui.label(RichText::new("·").color(pal.text_dim));
                 ui.hyperlink_to(RichText::new("© 2026 IntelligentWolf Ltd").color(pal.accent), WEBSITE)
                     .on_hover_text(WEBSITE);
                 ui.label(RichText::new("·").color(pal.text_dim));
@@ -2171,10 +2435,24 @@ impl BibleApp {
                     ui.label(RichText::new("© 2026 IntelligentWolf Ltd").strong());
                     ui.label(RichText::new("Open source under the MIT License").color(pal.text_dim));
                     ui.hyperlink_to(RichText::new(WEBSITE).color(pal.accent), WEBSITE);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        // Centre the pair of buttons under the text above.
+                        let w = 230.0;
+                        ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                        if ui.button("💬 Join our Discord").on_hover_text(DISCORD).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(DISCORD));
+                        }
+                        if ui.button("♥ Donate").on_hover_text(DONATE).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(DONATE));
+                        }
+                    });
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(
-                            "Bible texts are in the public domain, sourced from scrollmapper/bible_databases.\n\
+                            "Bible texts are in the public domain. KJV and WEB (with red letters) from eBible.org; \
+                             the others from scrollmapper/bible_databases.\n\
+                             Hymn suggestions from Hymnary.org (optional, online).\n\
                              Noto Serif typeface © The Noto Project Authors, SIL Open Font License 1.1.",
                         )
                         .small()
@@ -2263,7 +2541,11 @@ impl eframe::App for BibleApp {
         {
             self.focus_omnibox = true;
         }
-        self.keyboard(&ctx, &mut actions);
+        // Shortcuts act on the verses behind; not while the song dialog is up.
+        if self.w.editor.is_none() {
+            self.keyboard(&ctx, &mut actions);
+        }
+        self.worship_tick(&ctx);
 
         Panel::top("top")
             .frame(
@@ -2309,6 +2591,7 @@ impl eframe::App for BibleApp {
 
         self.sticky_notes(&ctx, &mut actions);
         self.about_window(&ctx);
+        self.song_editor(&ctx);
 
         for a in actions {
             self.apply(&ctx, a);

@@ -6,6 +6,7 @@
 
 mod app;
 mod bible;
+mod hymnary;
 mod store;
 mod theme;
 

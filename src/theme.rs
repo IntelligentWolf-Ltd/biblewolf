@@ -38,6 +38,11 @@ pub struct Palette {
     pub error_bg: Color32,
     pub ok_fg: Color32,
     pub ok_bg: Color32,
+    /// Words of Jesus ("red letters") on the page.
+    pub red_letter: Color32,
+    /// Red letters on a highlighted verse. In the dark theme no true red keeps
+    /// 4.5:1 on yellow ink, so highlighted red letters lighten to a rose.
+    pub red_letter_on_ink: Color32,
 }
 
 pub const MIDNIGHT: Palette = Palette {
@@ -58,6 +63,8 @@ pub const MIDNIGHT: Palette = Palette {
     error_bg: Color32::from_rgb(0x41, 0x1d, 0x1d),
     ok_fg: Color32::from_rgb(0xb8, 0xe6, 0xb5),
     ok_bg: Color32::from_rgb(0x1c, 0x33, 0x22),
+    red_letter: Color32::from_rgb(0xff, 0x8a, 0x80),
+    red_letter_on_ink: Color32::from_rgb(0xff, 0xbc, 0xb2),
 };
 
 pub const PARCHMENT: Palette = Palette {
@@ -78,6 +85,8 @@ pub const PARCHMENT: Palette = Palette {
     error_bg: Color32::from_rgb(0xf9, 0xde, 0xdc),
     ok_fg: Color32::from_rgb(0x1e, 0x5b, 0x2a),
     ok_bg: Color32::from_rgb(0xdc, 0xf0, 0xdc),
+    red_letter: Color32::from_rgb(0xa1, 0x15, 0x0f),
+    red_letter_on_ink: Color32::from_rgb(0xa1, 0x15, 0x0f),
 };
 
 pub fn palette(dark: bool) -> Palette {
@@ -304,6 +313,17 @@ mod tests {
         let (x, y) = (lum(a), lum(b));
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
     }
+    /// Composite a premultiplied-alpha colour (egui's storage) over an opaque one.
+    fn over_premul(top: Color32, under: Color32) -> Color32 {
+        let a = top.a() as f32 / 255.0;
+        let mix = |t: u8, u: u8| (t as f32 + u as f32 * (1.0 - a)).round().min(255.0) as u8;
+        Color32::from_rgb(
+            mix(top.r(), under.r()),
+            mix(top.g(), under.g()),
+            mix(top.b(), under.b()),
+        )
+    }
+
     /// Composite an unmultiplied-alpha colour over an opaque one.
     fn over(top: Color32, under: Color32) -> Color32 {
         let [r, g, b, a] = top.to_srgba_unmultiplied();
@@ -354,6 +374,23 @@ mod tests {
                 "on_accent (dark={})",
                 p.dark
             );
+            // Red letters: on the page, on the selection tint, and on every ink.
+            let selected_bg = over_premul(p.selected, p.surface);
+            for (what, bg) in [("page", p.surface), ("selection", selected_bg)] {
+                let c = contrast(p.red_letter, bg);
+                assert!(c >= 4.5, "red letters on {what} (dark={}) {c:.2}", p.dark);
+                let c = contrast(p.text, bg);
+                assert!(c >= 4.5, "text on {what} (dark={}) {c:.2}", p.dark);
+            }
+            for s in Swatch::ALL {
+                let under = over(highlight_ink(s, p.dark), p.surface);
+                let c = contrast(p.red_letter_on_ink, under);
+                assert!(
+                    c >= 4.5,
+                    "red letters on {s:?} ink (dark={}) {c:.2}",
+                    p.dark
+                );
+            }
             for s in Swatch::ALL {
                 let under = over(highlight_ink(s, p.dark), p.surface);
                 let c = contrast(p.text, under);
