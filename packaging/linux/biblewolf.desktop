@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=BibleWolf
+GenericName=Bible Study
+Comment=Read Bible translations side by side, highlight verses and keep sticky notes
+Exec=biblewolf
+Icon=biblewolf
+Terminal=false
+Categories=Education;Office;
+Keywords=bible;scripture;study;notes;
+StartupWMClass=biblewolf
