@@ -7,8 +7,8 @@
 **A fast, beautiful Bible study app for Windows, macOS and Linux.**
 Read translations side by side, highlight verses, and stick notes on them like post-its.
 
-[![CI](https://github.com/IntelligentWolf-Ltd/biblewolf/actions/workflows/ci.yml/badge.svg)](https://github.com/IntelligentWolf-Ltd/biblewolf/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/IntelligentWolf-Ltd/biblewolf?label=download)](https://github.com/IntelligentWolf-Ltd/biblewolf/releases/latest)
+[![CI](https://github.com/intelligentwolf/biblewolf/actions/workflows/ci.yml/badge.svg)](https://github.com/intelligentwolf/biblewolf/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/intelligentwolf/biblewolf?label=download)](https://github.com/intelligentwolf/biblewolf/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-d9b26a.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/S3wj882aQH)
 [![Donate](https://img.shields.io/badge/donate-GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/intelligentwolf)
@@ -32,7 +32,7 @@ Read translations side by side, highlight verses, and stick notes on them like p
 
 ## Download
 
-Get the latest build from the **[Releases page](https://github.com/IntelligentWolf-Ltd/biblewolf/releases/latest)**:
+Get the latest build from the **[Releases page](https://github.com/intelligentwolf/biblewolf/releases/latest)**:
 
 | Platform | File | Install |
 |---|---|---|
@@ -116,7 +116,7 @@ Sticky notes can carry **theme tags** too, and the Notes tab filters by them, so
 You need [Rust](https://rustup.rs) 1.89 or newer.
 
 ```sh
-git clone https://github.com/IntelligentWolf-Ltd/biblewolf.git
+git clone https://github.com/intelligentwolf/biblewolf.git
 cd biblewolf
 ./run.sh            # or: cargo run --release
 ```

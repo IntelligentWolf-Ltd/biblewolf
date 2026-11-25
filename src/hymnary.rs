@@ -144,7 +144,7 @@ pub fn fetch(p: Passage) -> Result<Vec<Hymn>, String> {
         .user_agent(concat!(
             "BibleWolf/",
             env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/IntelligentWolf-Ltd/biblewolf)"
+            " (+https://github.com/intelligentwolf/biblewolf)"
         ))
         .http_status_as_error(true)
         .build();
